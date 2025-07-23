@@ -1,94 +1,177 @@
-const functions = require('firebase-functions');
-const { onRequest, onHttpRequest } = require('firebase-functions/v2/https');
+// --- Import Firebase Functions v2 for HTTP triggers ---
+const { onRequest } = require('firebase-functions/v2/https');
+const { setGlobalOptions } = require('firebase-functions/v2');
+const { logger } = require('firebase-functions');
+
+// --- Import other necessary modules ---
 const admin = require('firebase-admin');
 const express = require('express');
 const bodyParser = require('body-parser');
 const path = require('path');
-const SchemaConnector = require('./lib/SchemaConnector');
-const logger = require('firebase-functions/logger');
+const { SchemaConnector } = require('st-schema'); // CORRECT: Using st-schema SDK
 
 admin.initializeApp();
 const db = admin.firestore();
 
-const app = express();
+setGlobalOptions({
+    region: 'us-central1',
+    memory: '256Mi',
+    timeoutSeconds: 60
+});
 
-// Set EJS as the view engine and specify the views directory
+const app = express();
 app.set('view engine', 'ejs');
 app.set('views', path.join(__dirname, 'views'));
 
-// --- SmartThings Schema App (Existing Logic) ---
-const smartthingsClientId = process.env.ST_CLIENT_ID_V2;
-const smartthingsClientSecret = process.env.ST_CLIENT_SECRET_V2;
+// --- SmartThings Schema App (Core Logic) ---
+const smartthingsClientId = process.env.ST_CLIENT_ID_V2; // Still used for logging/context if needed
+const smartthingsClientSecret = process.env.ST_CLIENT_SECRET_V2; // Still used for logging/context if needed
 
 logger.info(`SmartApp Init - Client ID: ${smartthingsClientId ? smartthingsClientId.substring(0, 8) + '...' : 'NOT SET'}`);
 logger.info(`SmartApp Init - Client Secret: ${smartthingsClientSecret ? smartthingsClientSecret.substring(0, 8) + '...' : 'NOT SET'}`);
 
-const DEVICE_HANDLER_TYPE = 'af75a67e-896e-4ba5-ab02-3e3f2a115a8c';  // <- from your Developer Console
+// --- FIX START: Initialize SchemaConnector and define handlers ---
+const connector = new SchemaConnector()
+    .enableEventLogging(2) // Enable event logging for debugging
+    .discoveryHandler((accessToken, response) => {
+        logger.info('Handling st-schema discovery request.');
+        // Use response.addDevice as per st-schema documentation
+        // deviceHandlerType must match what's configured in Developer Workspace if not using profileId
 
-const connector = new SchemaConnector();
+        try {
+            const deviceId = 'battery-alarm-switch-1';
+            const deviceType = 'c2c-switch';
+            const deviceName = 'Battery Alarm Switch';
 
-// ✅ 1. Discovery Handler
-connector.discoveryHandler((accessToken, response) => {
-    response.addDevice(
-        'battery-alarm-001',              // externalDeviceId
-        DEVICE_HANDLER_TYPE,              // deviceHandlerType: must match Developer Workspace
-        'Battery Alarm Switch',           // Display name
-        'Triggers SmartThings virtual device' // Description
-    );
-});
+            logger.info(`Adding device to response: ${deviceId}, type: ${deviceType}, name: ${deviceName}`);
 
-// ✅ 2. State Refresh Handler
-connector.stateRefreshHandler(async (accessToken, response, devices) => {
-    for (const device of devices) {
-        if (device.deviceHandlerType === DEVICE_HANDLER_TYPE) {
-            try {
-                const deviceDoc = await db.collection('devices').doc(device.externalDeviceId).get();
-                const currentState = deviceDoc.exists ? deviceDoc.data().state : 'off';
+            const device = {
+                externalDeviceId: deviceId,
+                deviceHandlerType: deviceType,
+                manufacturerName: 'Cool Coder',
+                modelName: 'Virtual Switch 1.0',
+                hwVersion: '1.0',
+                swVersion: '1.0',
+                deviceName: deviceName,
+                roomName: 'Default Room',
+            };
 
-                response.addDeviceState(device.externalDeviceId, {
-                    switch: { value: currentState }
-                });
-            } catch (error) {
-                console.error(`Error fetching state for device ${device.externalDeviceId}:`, error);
+            response.addDevice(device);
+            response.send();
+
+            logger.info('st-schema Discovery response sent.');
+        } catch (error) {
+            logger.error('Error in discovery handler:', error);
+        }
+    })
+    .stateRefreshHandler(async (accessToken, response, devices) => {
+        logger.info('Handling st-schema state refresh request.');
+        for (const device of devices) {
+            if (device.deviceHandlerType === 'c2c-switch') {
+                try {
+                    // Fetch current state from your backend (e.g., Firestore)
+                    // For now, return a default state
+                    const currentState = 'off'; // Replace with actual state from your app
+                    const currentBattery = 100; // Replace with actual battery from your app
+
+                    const component = response.addDevice(device.externalDeviceId).addComponent('main');
+                    component.addState('st.switch', 'switch', currentState);
+                    component.addState('st.battery', 'battery', currentBattery);
+                    component.addState('st.healthCheck', 'healthStatus', 'online');
+                } catch (error) {
+                    logger.error(`Error fetching state for device ${device.externalDeviceId}:`, error);
+                }
             }
         }
-    }
-});
+        logger.info('st-schema State refresh response sent.');
+    })
+    .commandHandler(async (accessToken, response, devices) => {
+        logger.info('Handling st-schema command request.');
+        for (const device of devices) {
+            if (device.deviceHandlerType === 'c2c-switch') {
+                const component = response.addDevice(device.externalDeviceId).addComponent('main');
+                for (const command of device.commands) {
+                    logger.info(`Received command: ${command.capability} - ${command.command} for device ${device.externalDeviceId}`);
+                    switch (command.capability) {
+                        case 'st.switch':
+                            const switchValue = command.command === 'on' ? 'on' : 'off';
+                            // TODO: Implement logic to send command to your Android app (e.g., via FCM)
+                            component.addState('st.switch', 'switch', switchValue);
+                            break;
+                        // Add other capabilities if needed (e.g., for battery level setting, though usually reported)
+                    }
+                }
+            }
+        }
+        logger.info('st-schema Command response sent.');
+    })
+    .callbackAccessHandler(async (accessToken, callbackAuthentication, callbackUrls) => {
+        logger.info('Handling st-schema callbackAccessHandler (OAuth tokens).');
+        // This handler is crucial for st-schema to store the access tokens
+        // received from your OAuth server. You need to store these tokens
+        // securely in your database (e.g., Firestore) linked to the user.
+        // The accessToken here is the one issued by YOUR /oauth/token endpoint.
+        // callbackAuthentication contains client_id, client_secret, etc.
+        // callbackUrls contains the URLs SmartThings will use to send events to your connector.
 
-// ✅ 3. Command Handler - must be async to use await
-connector.commandHandler(async (accessToken, response, devices) => {
-    for (const device of devices) {
-        try {
-            if (device.deviceHandlerType === DEVICE_HANDLER_TYPE) {
-                const command = device.commands[0];
-                const value = command.command === 'on' ? 'on' : 'off';
+        logger.info(`Access Token from OAuth: ${accessToken ? accessToken.substring(0, 8) + '...' : 'N/A'}`);
+        logger.info(`Callback Authentication: ${JSON.stringify(callbackAuthentication)}`);
+        logger.info(`Callback URLs: ${JSON.stringify(callbackUrls)}`);
 
-                // ✅ Optional: fetch from Firestore
-                const deviceDoc = await db.collection('devices')
-                    .doc(device.externalDeviceId)
-                    .get();
-
-                // Log Firestore data (if exists)
-                if (deviceDoc.exists) {
-                    console.log(`Device ${device.externalDeviceId} data:`, deviceDoc.data());
+        // --- FIX START: Implement secure storage of accessToken, callbackAuthentication, callbackUrls ---
+        if (accessToken && callbackAuthentication && callbackAuthentication.client_id) {
+            try {
+                // You need to get the user ID associated with this accessToken.
+                // This usually means verifying the accessToken with your own OAuth server (this function).
+                // For simplicity here, we'll assume the user ID can be derived from the accessTokenDoc if it exists
+                // OR that callbackAuthentication.principal is the user ID.
+                // For now, let's look up the user ID from our accessTokens collection.
+                const accessTokenDoc = await accessTokensRef.doc(accessToken).get();
+                let userId = null;
+                if (accessTokenDoc.exists) {
+                    userId = accessTokenDoc.data().user_id;
+                } else {
+                    logger.warn('CallbackAccessHandler: Access token not found in our database. Cannot link to user.');
+                    // In a real app, you might try to verify the token with SmartThings or your own auth server.
+                    // For this example, we'll proceed without a linked userId if not found.
                 }
 
-                // Respond with device state
-                response.addDeviceState(device.externalDeviceId, {
-                    switch: { value }
-                });
-
-                console.log(`Processed command: ${command.command} for device ${device.externalDeviceId}`);
+                if (userId) {
+                    await db.collection('smartthingsInstalls').doc(userId).set({
+                        userId: userId, // Your internal user ID
+                        stAccessToken: accessToken,
+                        stRefreshToken: callbackAuthentication.refreshToken || null, // Refresh token from SmartThings
+                        stCallbackUrls: callbackUrls, // URLs for sending proactive events
+                        clientId: callbackAuthentication.client_id, // SmartThings' client ID for your OAuth server
+                        timestamp: admin.firestore.FieldValue.serverTimestamp()
+                    }, { merge: true });
+                    logger.info(`SmartThings tokens stored for user ${userId}.`);
+                } else {
+                    logger.warn('SmartThings tokens not stored: User ID could not be determined from access token.');
+                }
+            } catch (error) {
+                logger.error('Failed to store SmartThings tokens in callbackAccessHandler:', error);
             }
-        } catch (err) {
-            console.error(`Error handling command for ${device.externalDeviceId}:`, err);
+        } else {
+            logger.warn('CallbackAccessHandler: Missing accessToken or callbackAuthentication.client_id.');
         }
-    }
-});
+        // --- FIX END ---
+    })
+    .integrationDeletedHandler(async (accessToken) => {
+        logger.info('Handling st-schema integrationDeletedHandler.');
+        // TODO: Clean up user data and tokens from your database when integration is removed from SmartThings
+        logger.info(`Integration deleted for access token: ${accessToken ? accessToken.substring(0, 8) + '...' : 'N/A'}`);
+    });
+// --- FIX END ---
 
 
-// --- NEW: Firestore reference for user usage tracking ---
+// --- Firestore reference for user usage tracking ---
 const userUsageRef = db.collection('userUsage');
+const oauthClientsRef = db.collection('oauthClients');
+const authCodesRef = db.collection('authCodes');
+const accessTokensRef = db.collection('accessTokens');
+const refreshTokensRef = db.collection('refreshTokens');
+
 
 // Helper function to get current month/year string for usage tracking
 const getCurrentMonthYear = () => {
@@ -106,106 +189,108 @@ const getRawBody = (req) => {
         req.on('end', () => {
             resolve(body);
         });
-        req.on('error', (error) => {
-            reject(error);
+        req.on('error', (err) => {
+            reject(err);
         });
     });
 };
 
 // --- Middleware to verify access token and apply rate limiting ---
 const verifyAccessTokenAndRateLimit = async (req, res, next) => {
-    logger.info('✅ Middleware invoked: verifyAccessTokenAndRateLimit');
+    logger.info('Executing verifyAccessTokenAndRateLimit middleware.');
     const authHeader = req.headers.authorization;
 
-    // Handle SmartThings schema requests without bearer tokens (e.g., discoveryRequest or ping)
     if (!authHeader || !authHeader.startsWith('Bearer ')) {
         const rawBody = await getRawBody(req);
-        req.rawBody = rawBody;
-
         let interactionType = null;
         try {
-            req.body = JSON.parse(rawBody.toString());
-            interactionType = req.body?.headers?.interactionType;
-        } catch (error) {
-            logger.warn('❗ Could not parse body as JSON in unauthenticated request:', error);
-            return res.status(400).json({ error: 'invalid_request', message: 'Invalid JSON format.' });
+            const parsedBody = JSON.parse(rawBody.toString());
+            interactionType = parsedBody?.headers?.interactionType;
+        } catch (e) {
+            logger.warn('Could not parse raw body for interactionType during unauthenticated check (this is normal for non-Schema requests or initial connection):', e);
         }
-
-        logger.info(`📡 Detected SmartThings schema call: interactionType=${interactionType}`);
 
         if (interactionType === 'discoveryRequest' || interactionType === 'ping') {
-            logger.info(`✅ Allowed unauthenticated SmartThings interaction: ${interactionType}`);
+            logger.info(`Unauthenticated Schema request (${interactionType}) detected, skipping Bearer token check.`);
+            req.rawBody = rawBody;
+            try {
+                req.body = JSON.parse(rawBody.toString());
+            } catch (err) {
+                logger.error('Failed to parse body for SmartApp schema request after raw body read:', err);
+                return res.status(400).json({ error: 'invalid_request', message: 'Could not parse body as JSON.' });
+            }
             return next();
         }
-
-        logger.warn('❌ Missing/invalid Authorization header in non-schema request');
-        return res.status(401).json({ error: 'unauthorized', message: 'Bearer token required.' });
+        logger.warn('Missing or invalid Authorization header in non-Schema request or unknown Schema type.');
+        return res.status(401).json({ error: 'unauthorized', message: 'Bearer token required for this request type.' });
     }
 
-    // Authenticated requests (e.g., stateRefresh, command, etc.)
     const accessToken = authHeader.split(' ')[1];
 
     try {
         const accessTokenDoc = await accessTokensRef.doc(accessToken).get();
         if (!accessTokenDoc.exists || accessTokenDoc.data().expires_at < Date.now()) {
-            logger.warn('❌ Invalid or expired access token.');
+            logger.warn('Invalid or expired access token in Schema request.');
             return res.status(401).json({ error: 'unauthorized', message: 'Invalid or expired access token.' });
         }
 
         const userId = accessTokenDoc.data().user_id;
         if (!userId) {
-            logger.warn('❌ Access token missing user ID.');
-            return res.status(401).json({ error: 'unauthorized', message: 'Token missing user ID.' });
+            logger.warn('Access token does not contain user ID.');
+            return res.status(401).json({ error: 'unauthorized', message: 'Invalid access token data.' });
         }
 
         req.userId = userId;
 
         const monthYear = getCurrentMonthYear();
         const userUsageDocRef = userUsageRef.doc(userId);
-        let rateLimitExceeded = false;
 
+        let rateLimitExceeded = false;
         await db.runTransaction(async (transaction) => {
-            const doc = await transaction.get(userUsageDocRef);
-            let count = 0;
+            const userUsageDoc = await transaction.get(userUsageDocRef);
+            let currentCount = 0;
             let usageData = {};
 
-            if (doc.exists) {
-                usageData = doc.data();
-                count = usageData[monthYear]?.count || 0;
+            if (userUsageDoc.exists) {
+                usageData = userUsageDoc.data();
+                if (usageData[monthYear]) {
+                    currentCount = usageData[monthYear].count || 0;
+                }
             }
 
-            const MAX = 100;
-            if (count >= MAX) {
-                logger.warn(`⛔ Rate limit exceeded for user ${userId} (${count}/${MAX})`);
+            const MAX_INVOCATIONS_PER_MONTH = 100;
+
+            if (currentCount >= MAX_INVOCATIONS_PER_MONTH) {
                 rateLimitExceeded = true;
+                logger.warn(`Rate limit exceeded for user ${userId} in ${monthYear}. Count: ${currentCount}`);
                 return;
             }
 
-            const newCount = count + 1;
+            const newCount = currentCount + 1;
             usageData[monthYear] = {
                 count: newCount,
                 lastInvocation: admin.firestore.FieldValue.serverTimestamp()
             };
             transaction.set(userUsageDocRef, usageData, { merge: true });
 
-            logger.info(`📊 Updated usage for ${userId}: ${newCount}`);
+            logger.info(`User ${userId} invocation count for ${monthYear}: ${newCount}`);
         });
 
         if (rateLimitExceeded) {
             return res.status(429).json({
+                headers: {},
                 statusCode: 429,
                 error: {
-                    type: 'RATE_LIMIT_EXCEEDED',
-                    message: `Rate limit exceeded (${MAX} requests per month).`
+                    message: `Rate limit of ${MAX_INVOCATIONS_PER_MONTH} invocations per month exceeded.`,
+                    type: 'RATE_LIMIT_EXCEEDED'
                 }
             });
         }
-
-        return next();
+        next();
 
     } catch (error) {
-        logger.error('💥 Middleware error:', error);
-        return res.status(500).json({ error: 'server_error', message: 'Internal error during request authentication.' });
+        logger.error('Error in verifyAccessTokenAndRateLimit middleware:', error);
+        res.status(500).json({ error: 'server_error', message: 'Internal authentication error.' });
     }
 };
 
@@ -215,7 +300,7 @@ const verifyAccessTokenAndRateLimit = async (req, res, next) => {
 app.post('/smartthings', verifyAccessTokenAndRateLimit, async (req, res) => {
     logger.info(`📥 SmartThings request body received at /smartthings: ${JSON.stringify(req.body)}`);
     try {
-        await connector.handleHttpCallback(req, res);  // ✅ CORRECT
+        await connector.handleHttpCallback(req, res); // Call connector.handleHttpCallback for st-schema SDK
     } catch (error) {
         logger.error('SmartApp handler error:', error);
         res.status(500).send('Internal Server Error');
@@ -225,26 +310,37 @@ app.post('/smartthings', verifyAccessTokenAndRateLimit, async (req, res) => {
 
 // --- NEW: Add a POST route for the root path to handle SmartThings Schema requests ---
 // SmartThings might POST to the root path after OAuth completion. It also needs raw body.
-app.post('/', verifyAccessTokenAndRateLimit, async(req, res) => {
-    logger.info('Incoming SmartThings Schema request received at root path (after rate limit check).');
-     try {
-    await connector.handleHttpCallback(req, res);  // ✅ CORRECT
-  } catch (error) {
-    logger.error('SmartApp handler error (root):', error);
-    res.status(500).send('Internal Server Error');
-  }
+    app.use(bodyParser.raw({ type: '*/*' }));
+    app.post('/', async (req, res) => {
+    logger.info('Incoming SmartThings Schema request received at root path after rate limit check');
+    logger.info('🔁 Received POST / from SmartThings');
+    logger.info('📦 Request Body: ' + JSON.stringify(req.body));
+    try {
+        await connector.handleHttpCallback(req, res); // Call connector.handleHttpCallback for st-schema SDK
+    } catch (error) {
+        logger.error('SmartApp handler error (root):', error);
+        res.status(500).send('Internal Server Error');
+    }
 });
+
+// --- FIX START: Add GET routes for basic endpoint verification ---
+// SmartThings might send GET requests for initial endpoint verification.
+app.get('/smartthings', (req, res) => {
+    logger.info('Received GET request to /smartthings. Responding with 200 OK.');
+    res.status(200).send('SmartThings Schema Endpoint is alive.');
+});
+
+app.get('/', (req, res) => {
+    logger.info('Received GET request to root path. Responding with 200 OK.');
+    res.status(200).send('SmartThings Schema Endpoint is alive.');
+});
+// --- FIX END ---
 
 
 // --- OAuth 2.0 Authorization Server (Existing Logic) ---
 // These endpoints DO need body-parser, so apply it specifically to them.
 app.use('/oauth', bodyParser.urlencoded({ extended: true })); // For /oauth/login POST
 app.use('/oauth', bodyParser.json()); // For /oauth/token POST
-
-const oauthClientsRef = db.collection('oauthClients');
-const authCodesRef = db.collection('authCodes');
-const accessTokensRef = db.collection('accessTokens');
-const refreshTokensRef = db.collection('refreshTokens');
 
 const generateRandomString = (length) => {
     const chars = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789';
@@ -315,7 +411,7 @@ app.post('/oauth/login', async (req, res) => {
     } catch (error) {
         logger.error('Error during OAuth login POST:', error);
         if (error.code === 'auth/user-not-found') {
-            return res.render('login', { client_id, redirect_uri, scope, state, error: 'User not found.' });
+            return res.status(500).json({ error: 'server_error' });
         }
         res.status(500).json({ error: 'server_error' });
     }
@@ -323,109 +419,12 @@ app.post('/oauth/login', async (req, res) => {
 
 app.post('/oauth/token', async (req, res) => {
     logger.info('OAuth /token request received.');
-    const {
-    grant_type,
-    code,
-    refresh_token,
-    client_id,
-    client_secret,
-    redirect_uri
-} = req.body;
+    const { grant_type, code, client_id, client_secret, redirect_uri } = req.body;
 
-if (!client_id || !client_secret) {
-    return res.status(400).json({ error: 'invalid_request', message: 'Missing client_id or client_secret' });
-}
-
-const clientDoc = await oauthClientsRef.doc(client_id).get();
-if (!clientDoc.exists) {
-    return res.status(401).json({ error: 'invalid_client' });
-}
-
-const client = clientDoc.data();
-if (client.client_secret !== client_secret) {
-    return res.status(401).json({ error: 'invalid_client' });
-}
-
-if (grant_type === 'authorization_code') {
-    if (!code || !redirect_uri) {
-        return res.status(400).json({ error: 'invalid_request', message: 'Missing code or redirect_uri' });
+    if (grant_type !== 'authorization_code') {
+        logger.warn(`Invalid grant_type: ${grant_type} in token request.`);
+        return res.status(400).json({ error: 'unsupported_grant_type' });
     }
-
-    const authCodeDoc = await authCodesRef.doc(code).get();
-    if (!authCodeDoc.exists) {
-        return res.status(400).json({ error: 'invalid_grant' });
-    }
-
-    const authCodeData = authCodeDoc.data();
-
-    if (
-        authCodeData.client_id !== client_id ||
-        authCodeData.redirect_uri !== redirect_uri ||
-        authCodeData.expires_at < Date.now()
-    ) {
-        return res.status(400).json({ error: 'invalid_grant' });
-    }
-
-    await authCodesRef.doc(code).delete();
-
-    const accessToken = generateRandomString(64);
-    const refreshToken = generateRandomString(64);
-    const expiresIn = 3600;
-
-    await accessTokensRef.doc(accessToken).set({
-        client_id,
-        user_id: authCodeData.user_id,
-        scope: authCodeData.scope,
-        expires_at: Date.now() + expiresIn * 1000,
-    });
-
-    await refreshTokensRef.doc(refreshToken).set({
-        client_id,
-        user_id: authCodeData.user_id,
-        scope: authCodeData.scope,
-    });
-
-    return res.json({
-        access_token: accessToken,
-        token_type: 'bearer',
-        expires_in: expiresIn,
-        refresh_token: refreshToken,
-        scope: authCodeData.scope,
-    });
-
-} else if (grant_type === 'refresh_token') {
-    if (!refresh_token) {
-        return res.status(400).json({ error: 'invalid_request', message: 'Missing refresh_token' });
-    }
-
-    const refreshDoc = await refreshTokensRef.doc(refresh_token).get();
-    if (!refreshDoc.exists) {
-        return res.status(400).json({ error: 'invalid_grant', message: 'Invalid refresh token' });
-    }
-
-    const refreshData = refreshDoc.data();
-
-    const accessToken = generateRandomString(64);
-    const expiresIn = 3600;
-
-    await accessTokensRef.doc(accessToken).set({
-        client_id,
-        user_id: refreshData.user_id,
-        scope: refreshData.scope,
-        expires_at: Date.now() + expiresIn * 1000,
-    });
-
-    return res.json({
-        access_token: accessToken,
-        token_type: 'bearer',
-        expires_in: expiresIn,
-        scope: refreshData.scope,
-    });
-
-} else {
-    logger.warn(`Unsupported grant_type: ${grant_type}`);
-    return res.status(400).json({ error: 'unsupported_grant_type' });
-}
 
     if (!code || !client_id || !client_secret || !redirect_uri) {
         logger.warn('Missing required parameters in token request.');
@@ -491,6 +490,5 @@ if (grant_type === 'authorization_code') {
     }
 });
 
-console.log("✅ Exporting smartthingsConnector");
 // Export the Express app as a single Firebase Function
-exports.smartthingsConnector = onHttpRequest({ region: 'us-central1' }, app);
+exports.smartthingsConnector = onRequest(app);
