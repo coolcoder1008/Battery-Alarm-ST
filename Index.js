@@ -39,25 +39,46 @@ const connector = new SchemaConnector()
         // deviceHandlerType must match what's configured in Developer Workspace if not using profileId
 
         try {
-            const deviceId = 'battery-alarm-switch-1';
-            const deviceType = 'c2c-switch';
-            const deviceName = 'Battery Alarm Switch';
+            //const deviceId = 'battery-alarm-switch-1';
+            //const deviceType = 'c2c-switch';
+            //const deviceName = 'Battery Alarm Switch';
 
-            logger.info(`Adding device to response: ${deviceId}, type: ${deviceType}, name: ${deviceName}`);
+            //logger.info(`Adding device to response: ${deviceId}, type: ${deviceType}, name: ${deviceName}`);
 
-            const device = {
-                externalDeviceId: deviceId,
-                deviceHandlerType: deviceType,
-                manufacturerName: 'Cool Coder',
-                modelName: 'Virtual Switch 1.0',
-                hwVersion: '1.0',
-                swVersion: '1.0',
-                deviceName: deviceName,
-                roomName: 'Default Room',
-            };
-
-            response.addDevice(device);
-            response.send();
+          //  const device = {
+           //    externalDeviceId: 'battery-alarm-switch-1',
+           //     deviceHandlerType: 'c2c-switch',
+           //     manufacturerName: 'Cool Coder',
+           //     modelName: 'Virtual Switch 1.0',
+           //     hwVersion: '1.0',
+           //     swVersion: '1.0',
+           //     deviceName: 'Battery Alarm Switch',
+           //     roomName: 'Default Room',
+           // };
+          //  const device = {
+          //      'battery-alarm-switch-1',
+          //      deviceHandlerType: 'c2c-switch',
+          //      manufacturerName: 'Cool Coder',
+          //      modelName: 'Virtual Switch 1.0',
+          //      hwVersion: '1.0',
+          //      swVersion: '1.0',
+          //      deviceName: 'Battery Alarm Switch',
+          //      roomName: 'Default Room',
+          //  };
+            
+          //  logger.info('Device object before addDevice:', JSON.stringify(device)); 
+            response.addDevice({
+               externalDeviceId: 'battery-alarm-switch-1',
+               friendlyName: 'Battery Alarm Switch',
+               manufacturerInfo: {
+               manufacturerName: 'Cool Coder',
+               modelName: 'Virtual Switch 1.0',
+               hwVersion: '1.0',
+               swVersion: '1.0'
+               },
+              deviceHandlerType: 'c2c-switch'
+             });
+        //    response.send();
 
             logger.info('st-schema Discovery response sent.');
         } catch (error) {
